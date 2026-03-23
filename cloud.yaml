@@ -1,6 +1,6 @@
 provider: runpod
 github_repo: rstager/hello
-network_volume_id: thk2nt0jj5
+network_volume_id: r3zm8yfnsh
 network_volume_name: hello
 network_volume_size_gb: 10
 container_disk_gb: 40
