@@ -1,0 +1,11 @@
+provider: runpod
+github_repo: rstager/hello
+network_volume_id: ypghgz822p
+network_volume_name: hello
+network_volume_size_gb: 10
+container_disk_gb: 40
+data_persistent: false
+data_center_id: US-TX-3
+gpu_type: NVIDIA GeForce RTX 4090
+image: ghcr.io/rstager/ml-torch:latest
+base_image: ml-torch
