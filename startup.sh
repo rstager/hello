@@ -1,35 +1,35 @@
 #!/bin/bash
 # =============================================================================
-# startup.sh — Lives in the project repo at /workspace/REPO_NAME/startup.sh
-# Called by entrypoint.sh after clone/pull. Handles:
+# startup.sh — Lives in the project repo. Run as `coder` after pod deploy.
+# Handles:
 #   - Sourcing .env + patching .bashrc
-#   - GPU + volume verification
+#   - GPU verification
 #   - Creating standard directories
 #   - Installing project Python dependencies (uv sync)
 #   - Downloading data if missing (project-specific — edit the DATA SETUP section)
 #   - Starting the main process or keeping alive for interactive use
 #
 # IDEMPOTENCY REQUIREMENT:
-#   This script is called every time a pod starts, including after pause/resume
-#   and stop/restart. Every step MUST be safe to run multiple times:
+#   Safe to run multiple times (after pause/resume, stop/restart, re-deploy).
 #
 #   ✓ mkdir -p          — safe, no-ops if dir exists
 #   ✓ ln -sfn           — safe, overwrites existing symlinks
 #   ✓ uv sync           — safe, idempotent package install
 #   ✓ .bashrc patching  — guarded by grep check
 #   ✓ DATA SETUP        — MUST use a flag file to skip completed downloads
-#                         (see section 8 below — the flag-file pattern is
-#                          REQUIRED, not optional)
-#   ✗ avoid             — anything that assumes a clean container state,
-#                         binds a port without checking, or writes without
-#                         checking if the output already exists
+#   ✗ avoid             — anything that assumes a clean container state
 # =============================================================================
 set -euo pipefail
 
 REPO_NAME="${REPO_NAME:-hello}"
-REPO_DIR="/workspace/$REPO_NAME"
+if [ -z "$REPO_NAME" ]; then
+    echo "[startup] ERROR: REPO_NAME env var not set — set it in pod config"
+    tail -f /dev/null
+    exit 1
+fi
+REPO_DIR="$HOME/$REPO_NAME"
 ENV_FILE="$REPO_DIR/.env"
-BASHRC="/root/.bashrc"
+BASHRC="$HOME/.bashrc"
 
 echo "[startup] $(date)"
 
@@ -48,11 +48,10 @@ fi
 # -----------------------------------------------------------------------------
 BASHRC_MARKER="# cloud: auto-source project .env"
 if ! grep -qF "$BASHRC_MARKER" "$BASHRC" 2>/dev/null; then
-    echo "[startup] Patching $BASHRC to auto-source $ENV_FILE and set UV_PROJECT_ENVIRONMENT"
+    echo "[startup] Patching $BASHRC"
     cat >> "$BASHRC" << BASHEOF
 
 $BASHRC_MARKER
-export UV_PROJECT_ENVIRONMENT=/opt/venv
 if [ -f "$ENV_FILE" ]; then
     set -a; source "$ENV_FILE"; set +a
 fi
@@ -63,64 +62,65 @@ fi
 # 3. GPU check
 # -----------------------------------------------------------------------------
 echo "[startup] GPU:"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader \
+sudo nvidia-smi --query-gpu=name,memory.total --format=csv,noheader \
     || echo "[startup] WARNING: nvidia-smi failed"
 
 # -----------------------------------------------------------------------------
-# 4. Volume check
+# 4. Standard directories (under home — no root needed)
 # -----------------------------------------------------------------------------
-for vol in /workspace /data /scratch; do
-    if [ -d "$vol" ]; then
-        echo "[startup] $vol: $(df -h "$vol" | tail -1 | awk '{print $4}') free"
-    else
-        echo "[startup] WARNING: $vol not available"
-    fi
-done
+mkdir -p ~/data/datasets ~/data/checkpoints ~/data/logs ~/data/wandb ~/data/.cache/huggingface
+mkdir -p ~/scratch/tmp ~/scratch/compile
 
 # -----------------------------------------------------------------------------
-# 5. Standard directories
+# 5. Export standard paths
 # -----------------------------------------------------------------------------
-mkdir -p /data/datasets /data/checkpoints /data/logs /data/wandb /data/.cache/huggingface
-mkdir -p /scratch/tmp /scratch/compile
-
-# -----------------------------------------------------------------------------
-# 6. Export standard paths
-# -----------------------------------------------------------------------------
-export HF_HOME="${HF_HOME:-/data/.cache/huggingface}"
-export WANDB_DIR="${WANDB_DIR:-/data/wandb}"
-export TMPDIR="${TMPDIR:-/scratch/tmp}"
+export HF_HOME="${HF_HOME:-$HOME/data/.cache/huggingface}"
+export WANDB_DIR="${WANDD_DIR:-$HOME/data/wandb}"
+export TMPDIR="${TMPDIR:-$HOME/scratch/tmp}"
 export PYTHONPATH="${PYTHONPATH:-$REPO_DIR}"
 
 # -----------------------------------------------------------------------------
-# 7. Install project-specific Python dependencies
+# 6. Install project-specific Python dependencies
 # -----------------------------------------------------------------------------
 if [ -f "$REPO_DIR/pyproject.toml" ]; then
     echo "[startup] Running uv sync..."
-    export UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.uv-cache}"
-    mkdir -p "$UV_CACHE_DIR"
     cd "$REPO_DIR"
     uv sync --frozen --no-install-project 2>&1 | sed 's/^/[startup:uv] /'
     echo "[startup] uv sync complete"
 fi
 
 # -----------------------------------------------------------------------------
-# 8. DATA SETUP — no persistent data needed for this project
-# -----------------------------------------------------------------------------
+# 7. DATA SETUP — edit this section per project
+#
+#    !! IDEMPOTENCY REQUIRED !!
+#    Always guard downloads with a flag file so they only run once.
+#
+# Example (uncomment and adapt):
+# DATA_READY_FLAG="$HOME/data/datasets/.ready"
+# if [ ! -f "$DATA_READY_FLAG" ]; then
+#     echo "[startup] First run — downloading data..."
+#     cd "$REPO_DIR"
+#     uv run prepare.py
+#     touch "$DATA_READY_FLAG"
+#     echo "[startup] Data setup complete"
+# else
+#     echo "[startup] Data already present — skipping download"
+# fi
 
 # -----------------------------------------------------------------------------
-# 9. Convenience symlinks into repo dir
+# 8. Convenience symlinks into repo dir
 # -----------------------------------------------------------------------------
-ln -sfn /data/checkpoints "$REPO_DIR/checkpoints" 2>/dev/null || true
-ln -sfn /data/datasets    "$REPO_DIR/datasets"    2>/dev/null || true
-ln -sfn /data/logs        "$REPO_DIR/logs"        2>/dev/null || true
+ln -sfn ~/data/checkpoints "$REPO_DIR/checkpoints" 2>/dev/null || true
+ln -sfn ~/data/datasets    "$REPO_DIR/datasets"    2>/dev/null || true
+ln -sfn ~/data/logs        "$REPO_DIR/logs"        2>/dev/null || true
 
 # -----------------------------------------------------------------------------
-# 10. Main process
+# 9. Main process — replace tail with your actual entrypoint
+#    e.g.: exec uv run train.py
+#          exec jupyter lab --ip=0.0.0.0 --port=8888 --no-browser
 # -----------------------------------------------------------------------------
 echo "[startup] Ready — repo at $REPO_DIR"
 cd "$REPO_DIR"
 
-# Run hello.py then keep alive for interactive SSH use
-python hello.py
-
+# Keep alive for interactive SSH use:
 tail -f /dev/null
